@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bufio"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -26,6 +27,7 @@ type Server struct {
 	Blob       *blob.Store
 	DataDir    string
 	SecureOnly bool
+	SecretKey  []byte
 }
 
 func (s *Server) Router() http.Handler {
@@ -51,26 +53,62 @@ func (s *Server) Router() http.Handler {
 			r.Use(s.Auth.Middleware)
 			r.Use(s.Auth.CSRFMiddleware)
 
-			r.Get("/projects", s.handleProjects)
-			r.Post("/projects", s.handleCreateProject)
-			r.Get("/projects/{id}", s.handleProject)
-			r.Get("/projects/{id}/pipelines", s.handleProjectPipelines)
-			r.Post("/projects/{id}/pipelines", s.handleCreatePipeline)
-			r.Get("/pipelines/{id}", s.handlePipeline)
-			r.Get("/pipelines/{id}/steps", s.handlePipelineSteps)
-			r.Get("/pipelines/{id}/logs", s.handlePipelineLogs)
-			r.Get("/pipelines/{id}/logs/stream", wsHandler(s))
+			r.With(s.requirePermission("projects.read")).Get("/projects", s.handleProjects)
+			r.With(s.requirePermission("projects.write")).Post("/projects", s.handleCreateProject)
+			r.With(s.requirePermission("projects.read")).Get("/projects/{id}", s.handleProject)
+			r.With(s.requirePermission("pipelines.read")).Get("/projects/{id}/pipelines", s.handleProjectPipelines)
+			r.With(s.requirePermission("pipelines.write")).Post("/projects/{id}/pipelines", s.handleCreatePipeline)
+			r.With(s.requirePermission("pipelines.read")).Get("/pipelines/{id}", s.handlePipeline)
+			r.With(s.requirePermission("pipelines.read")).Get("/pipelines/{id}/steps", s.handlePipelineSteps)
+			r.With(s.requirePermission("logs.read")).Get("/pipelines/{id}/logs", s.handlePipelineLogs)
+			r.With(s.requirePermission("logs.read")).Get("/pipelines/{id}/logs/stream", wsHandler(s))
 
-			r.Get("/releases", s.handleReleases)
-			r.Post("/releases", s.handleCreateRelease)
-			r.Get("/releases/{id}", s.handleRelease)
-			r.Get("/releases/{id}/artifacts", s.handleArtifacts)
-			r.Post("/artifacts", s.handleCreateArtifact)
+			r.With(s.requirePermission("releases.read")).Get("/releases", s.handleReleases)
+			r.With(s.requirePermission("releases.write")).Post("/releases", s.handleCreateRelease)
+			r.With(s.requirePermission("releases.read")).Get("/releases/{id}", s.handleRelease)
+			r.With(s.requirePermission("releases.read")).Get("/releases/{id}/artifacts", s.handleArtifacts)
+			r.With(s.requirePermission("artifacts.write")).Post("/artifacts", s.handleCreateArtifact)
 
-			r.Get("/settings", s.handleSettings)
-			r.Post("/settings", s.handleSettingsUpdate)
-			r.Get("/secrets", s.handleSecrets)
-			r.Post("/secrets", s.handleSecretsUpdate)
+			r.With(s.requirePermission("settings.read")).Get("/settings", s.handleSettings)
+			r.With(s.requirePermission("settings.write")).Post("/settings", s.handleSettingsUpdate)
+			r.With(s.requirePermission("secrets.read")).Get("/secrets", s.handleSecrets)
+			r.With(s.requirePermission("secrets.write")).Post("/secrets", s.handleSecretsUpdate)
+			r.With(s.requirePermission("secrets.write")).Put("/secrets/{id}", s.handleSecretsUpdate)
+			r.With(s.requirePermission("secrets.write")).Delete("/secrets/{id}", s.handleSecretsDelete)
+
+			r.With(s.requirePermission("runners.read")).Get("/runners", s.handleRunners)
+			r.With(s.requirePermission("runners.write")).Post("/runners", s.handleCreateRunner)
+			r.With(s.requirePermission("runners.write")).Put("/runners/{id}", s.handleUpdateRunner)
+			r.With(s.requirePermission("runners.write")).Delete("/runners/{id}", s.handleDeleteRunner)
+			r.With(s.requirePermission("runners.read")).Get("/runners/summary", s.handleRunnerSummary)
+
+			r.With(s.requirePermission("env.read")).Get("/environments", s.handleEnvironments)
+			r.With(s.requirePermission("env.write")).Post("/environments", s.handleCreateEnvironment)
+			r.With(s.requirePermission("env.read")).Get("/environments/{id}/releases", s.handleEnvironmentReleases)
+			r.With(s.requirePermission("env.write")).Post("/promotions", s.handlePromotion)
+			r.With(s.requirePermission("env.write")).Post("/rollbacks", s.handleRollback)
+
+			r.With(s.requirePermission("plugins.read")).Get("/plugins", s.handlePlugins)
+			r.With(s.requirePermission("plugins.write")).Post("/plugins", s.handleCreatePlugin)
+			r.With(s.requirePermission("plugins.read")).Get("/plugins/{id}/versions", s.handlePluginVersions)
+			r.With(s.requirePermission("plugins.write")).Post("/plugins/{id}/versions", s.handleCreatePluginVersion)
+
+			r.With(s.requirePermission("sso.read")).Get("/sso/providers", s.handleSSOProviders)
+			r.With(s.requirePermission("sso.write")).Post("/sso/providers", s.handleCreateSSOProvider)
+			r.With(s.requirePermission("sso.write")).Put("/sso/providers/{id}", s.handleUpdateSSOProvider)
+			r.With(s.requirePermission("sso.write")).Delete("/sso/providers/{id}", s.handleDeleteSSOProvider)
+			r.With(s.requirePermission("sso.read")).Get("/sso/authorize", s.handleSSOAuthorize)
+
+			r.With(s.requirePermission("rbac.read")).Get("/roles", s.handleRoles)
+			r.With(s.requirePermission("rbac.write")).Post("/roles", s.handleCreateRole)
+			r.With(s.requirePermission("rbac.write")).Put("/roles/{id}", s.handleUpdateRole)
+			r.With(s.requirePermission("rbac.write")).Delete("/roles/{id}", s.handleDeleteRole)
+			r.With(s.requirePermission("rbac.read")).Get("/permissions", s.handlePermissions)
+			r.With(s.requirePermission("rbac.write")).Post("/roles/{id}/permissions", s.handleAssignRolePermissions)
+			r.With(s.requirePermission("rbac.write")).Post("/users/{id}/roles", s.handleAssignUserRoles)
+
+			r.With(s.requirePermission("audit.read")).Get("/audit", s.handleAudit)
+			r.With(s.requirePermission("metrics.read")).Get("/metrics", s.handleMetrics)
 		})
 	})
 
@@ -211,6 +249,7 @@ func (s *Server) handleCreateProject(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "insert failed", http.StatusInternalServerError)
 		return
 	}
+	s.audit(r.Context(), identityID(r), "projects.create", payload.Name, "created", requestIP(r))
 	writeJSON(w, http.StatusCreated, map[string]any{"id": id})
 }
 
@@ -291,6 +330,7 @@ func (s *Server) handleCreatePipeline(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "insert failed", http.StatusInternalServerError)
 		return
 	}
+	s.audit(r.Context(), identityID(r), "pipelines.create", projectID, id, requestIP(r))
 	writeJSON(w, http.StatusCreated, map[string]any{"id": id})
 }
 
@@ -370,7 +410,17 @@ func (s *Server) handlePipelineLogs(w http.ResponseWriter, r *http.Request) {
 	defer reader.Close()
 
 	w.Header().Set("Content-Type", "text/plain")
-	_, _ = io.Copy(w, reader)
+	secrets := s.secretValues(r.Context())
+	scanner := bufio.NewScanner(reader)
+	for scanner.Scan() {
+		line := scanner.Text()
+		for _, secret := range secrets {
+			if secret != "" {
+				line = strings.ReplaceAll(line, secret, "*****")
+			}
+		}
+		_, _ = io.WriteString(w, line+"\n")
+	}
 }
 
 func (s *Server) handleReleases(w http.ResponseWriter, r *http.Request) {
@@ -431,6 +481,7 @@ func (s *Server) handleCreateRelease(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "insert failed", http.StatusInternalServerError)
 		return
 	}
+	s.audit(r.Context(), identityID(r), "releases.create", payload.ProjectID, id, requestIP(r))
 	writeJSON(w, http.StatusCreated, map[string]any{"id": id})
 }
 
@@ -522,6 +573,7 @@ func (s *Server) handleCreateArtifact(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "insert failed", http.StatusInternalServerError)
 		return
 	}
+	s.audit(r.Context(), identityID(r), "artifacts.create", payload.ReleaseID, payload.Name, requestIP(r))
 	writeJSON(w, http.StatusCreated, map[string]any{"id": id})
 }
 
@@ -570,21 +622,46 @@ func (s *Server) handlePublicLatest(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{
-		"version": "openaction",
-		"ui":      "svelte",
-	})
+	rows, err := s.DB.QueryContext(r.Context(), "SELECT key,value,updated_at FROM settings ORDER BY key")
+	if err != nil {
+		http.Error(w, "query failed", http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+	var items []map[string]any
+	for rows.Next() {
+		var key, value string
+		var updated int64
+		if err := rows.Scan(&key, &value, &updated); err != nil {
+			http.Error(w, "scan failed", http.StatusInternalServerError)
+			return
+		}
+		items = append(items, map[string]any{
+			"key":        key,
+			"value":      value,
+			"updated_at": updated,
+		})
+	}
+	writeJSON(w, http.StatusOK, items)
 }
 
 func (s *Server) handleSettingsUpdate(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
-}
-
-func (s *Server) handleSecrets(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, []any{})
-}
-
-func (s *Server) handleSecretsUpdate(w http.ResponseWriter, r *http.Request) {
+	var payload struct {
+		Key   string `json:"key"`
+		Value string `json:"value"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil || payload.Key == "" {
+		http.Error(w, "invalid payload", http.StatusBadRequest)
+		return
+	}
+	_, err := s.DB.ExecContext(r.Context(),
+		"INSERT INTO settings(key,value,updated_at) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+		payload.Key, payload.Value, time.Now().Unix())
+	if err != nil {
+		http.Error(w, "update failed", http.StatusInternalServerError)
+		return
+	}
+	s.audit(r.Context(), identityID(r), "settings.update", payload.Key, "updated", requestIP(r))
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
@@ -595,10 +672,21 @@ func writeJSON(w http.ResponseWriter, status int, payload any) {
 }
 
 func wsHandler(s *Server) http.HandlerFunc {
-	handler := &ws.LogHandler{
-		Open: func(ctx context.Context, logPath string) (io.ReadCloser, error) {
-			return s.Blob.ReadDecompressed(logPath)
-		},
+	return func(w http.ResponseWriter, r *http.Request) {
+		secrets := s.secretValues(r.Context())
+		handler := &ws.LogHandler{
+			Open: func(ctx context.Context, logPath string) (io.ReadCloser, error) {
+				return s.Blob.ReadDecompressed(logPath)
+			},
+			Mask: func(line string) string {
+				for _, secret := range secrets {
+					if secret != "" {
+						line = strings.ReplaceAll(line, secret, "*****")
+					}
+				}
+				return line
+			},
+		}
+		handler.ServeHTTP(w, r)
 	}
-	return handler.ServeHTTP
 }

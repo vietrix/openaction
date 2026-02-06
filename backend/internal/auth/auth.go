@@ -86,9 +86,10 @@ func (s *Service) CreateSession(ctx context.Context, userID string) (string, tim
 func (s *Service) CreateToken(ctx context.Context, name string) (string, error) {
 	raw := "oa_" + randomString(32)
 	hash := sha256.Sum256([]byte(raw))
+	expiresAt := time.Now().Add(s.TokenTTL).Unix()
 	_, err := s.DB.ExecContext(ctx,
-		"INSERT INTO api_tokens(id,name,token_hash,last_used,created_at) VALUES(?,?,?,?,?)",
-		uuid.NewString(), name, hex.EncodeToString(hash[:]), time.Now().Unix(), time.Now().Unix())
+		"INSERT INTO api_tokens(id,name,token_hash,last_used,created_at,expires_at) VALUES(?,?,?,?,?,?)",
+		uuid.NewString(), name, hex.EncodeToString(hash[:]), time.Now().Unix(), time.Now().Unix(), expiresAt)
 	if err != nil {
 		return "", err
 	}
@@ -99,9 +100,15 @@ func (s *Service) ValidateToken(ctx context.Context, token string) (*Identity, e
 	hash := sha256.Sum256([]byte(token))
 	var id string
 	var name string
-	err := s.DB.QueryRowContext(ctx, "SELECT id,name FROM api_tokens WHERE token_hash = ?", hex.EncodeToString(hash[:])).Scan(&id, &name)
+	var expiresAt sql.NullInt64
+	err := s.DB.QueryRowContext(ctx, "SELECT id,name,expires_at FROM api_tokens WHERE token_hash = ?", hex.EncodeToString(hash[:])).
+		Scan(&id, &name, &expiresAt)
 	if err != nil {
 		return nil, err
+	}
+	if expiresAt.Valid && time.Now().Unix() > expiresAt.Int64 {
+		_, _ = s.DB.ExecContext(ctx, "DELETE FROM api_tokens WHERE id = ?", id)
+		return nil, errors.New("token expired")
 	}
 	_, _ = s.DB.ExecContext(ctx, "UPDATE api_tokens SET last_used = ? WHERE id = ?", time.Now().Unix(), id)
 	return &Identity{UserID: id, Email: name, IsToken: true}, nil
@@ -207,6 +214,21 @@ func (s *Service) ClearSessionCookie(w http.ResponseWriter) {
 		Secure:   true,
 		SameSite: http.SameSiteStrictMode,
 	})
+}
+
+func (s *Service) CleanupExpired(ctx context.Context) {
+	ticker := time.NewTicker(1 * time.Hour)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			now := time.Now().Unix()
+			_, _ = s.DB.ExecContext(ctx, "DELETE FROM sessions WHERE expires_at < ?", now)
+			_, _ = s.DB.ExecContext(ctx, "DELETE FROM api_tokens WHERE expires_at < ?", now)
+		}
+	}
 }
 
 func identityFromRequest(r *http.Request, s *Service) *Identity {

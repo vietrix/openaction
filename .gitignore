@@ -6,4 +6,6 @@
 **/*.db
 **/*.db-shm
 **/*.db-wal
+**/.vbuild
+**/.vbuild.lock
 **/.DS_Store

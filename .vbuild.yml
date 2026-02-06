@@ -1,0 +1,29 @@
+workflow: "OpenAction"
+
+tasks:
+  dev:
+    desc: run frontend + backend + pool
+    parallel: true
+    run:
+      - cd backend && go run ./cmd/openaction
+      - cd frontend && npm run dev
+      - cd pool && go run ./cmd/poold
+
+  build:
+    desc: build all binaries + frontend
+    run:
+      - cd backend && go build -o bin/openaction ./cmd/openaction
+      - cd pool && go build -o bin/poold ./cmd/poold
+      - cd frontend && npm run build
+
+  test:
+    desc: run backend + pool tests
+    run:
+      - cd backend && go test ./...
+      - cd pool && go test ./...
+
+  lint:
+    desc: lint go code
+    run:
+      - cd backend && go vet ./...
+      - cd pool && go vet ./...

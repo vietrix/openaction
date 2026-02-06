@@ -16,6 +16,7 @@ type LogStreamer interface {
 
 type LogHandler struct {
 	Open func(ctx context.Context, logPath string) (io.ReadCloser, error)
+	Mask func(line string) string
 }
 
 func (h *LogHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -43,6 +44,9 @@ func (h *LogHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	scanner := bufio.NewScanner(reader)
 	for scanner.Scan() {
 		line := scanner.Text()
+		if h.Mask != nil {
+			line = h.Mask(line)
+		}
 		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 		_ = conn.Write(ctx, websocket.MessageText, []byte(line))
 		cancel()

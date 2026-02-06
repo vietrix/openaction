@@ -19,6 +19,7 @@ type Config struct {
 	SessionTTL   time.Duration `yaml:"session_ttl"`
 	TokenTTL     time.Duration `yaml:"token_ttl"`
 	CSRFEnabled  bool          `yaml:"csrf_enabled"`
+	SecretKey    string        `yaml:"secret_key"`
 	TLSCertPath  string        `yaml:"tls_cert"`
 	TLSKeyPath   string        `yaml:"tls_key"`
 	CACertPath   string        `yaml:"ca_cert"`
@@ -36,6 +37,7 @@ type fileConfig struct {
 	SessionTTL   string `yaml:"session_ttl"`
 	TokenTTL     string `yaml:"token_ttl"`
 	CSRFEnabled  *bool  `yaml:"csrf_enabled"`
+	SecretKey    string `yaml:"secret_key"`
 	TLSCertPath  string `yaml:"tls_cert"`
 	TLSKeyPath   string `yaml:"tls_key"`
 	CACertPath   string `yaml:"ca_cert"`
@@ -104,6 +106,9 @@ func Load() (*Config, error) {
 	if csrf := os.Getenv("OA_CSRF"); csrf != "" {
 		cfg.CSRFEnabled = csrf == "1" || csrf == "true"
 	}
+	if v := os.Getenv("OA_SECRET_KEY"); v != "" {
+		cfg.SecretKey = v
+	}
 	if v := os.Getenv("OA_TLS_CERT"); v != "" {
 		cfg.TLSCertPath = v
 	}
@@ -121,6 +126,9 @@ func Load() (*Config, error) {
 	}
 	if v := os.Getenv("OA_POOL_GRPC_ADDR"); v != "" {
 		cfg.PoolGRPCAddr = v
+	}
+	if cfg.SecretKey == "" {
+		return nil, errors.New("OA_SECRET_KEY is required")
 	}
 
 	return cfg, nil
@@ -162,6 +170,9 @@ func applyFileConfig(cfg *Config, path string) error {
 	}
 	if fc.CSRFEnabled != nil {
 		cfg.CSRFEnabled = *fc.CSRFEnabled
+	}
+	if fc.SecretKey != "" {
+		cfg.SecretKey = fc.SecretKey
 	}
 	if fc.TLSCertPath != "" {
 		cfg.TLSCertPath = fc.TLSCertPath

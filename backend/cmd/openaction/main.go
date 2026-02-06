@@ -24,6 +24,8 @@ import (
 	"openaction/internal/config"
 	"openaction/internal/db"
 	"openaction/internal/pool"
+	"openaction/internal/secret"
+	"openaction/internal/seed"
 	"openaction/internal/ui"
 	"openaction/pkg/poolpb"
 )
@@ -60,6 +62,7 @@ func main() {
 	}
 
 	blobStore := blob.New(cfg.DataDir)
+	secretKey := secret.DeriveKey(cfg.SecretKey)
 
 	apiServer := &api.Server{
 		DB:         database,
@@ -67,7 +70,14 @@ func main() {
 		Blob:       blobStore,
 		DataDir:    cfg.DataDir,
 		SecureOnly: cfg.TLSCertPath != "" && cfg.TLSKeyPath != "",
+		SecretKey:  secretKey,
 	}
+
+	if err := seed.EnsureDefaults(ctx, database); err != nil {
+		log.Fatalf("seed error: %v", err)
+	}
+
+	go authService.CleanupExpired(ctx)
 
 	router := chi.NewRouter()
 	router.Mount("/", apiServer.Router())
