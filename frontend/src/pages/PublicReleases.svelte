@@ -1,258 +1,269 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
   import { Download, Home, Package, Layers } from '@lucide/svelte';
   import { marked } from 'marked';
   import { cn } from '@/lib/utils';
   import { link } from '@/lib/router';
+  import { api } from '@/lib/api';
 
-  type Asset = { name: string; size: string };
-  type Patch = { id: string; name: string; assets: Asset[] };
+  type Release = {
+    id: string;
+    project_id: string;
+    version: string;
+    build: string;
+    patch: string;
+    created_at: number;
+    update_path: string;
+  };
+
+  type Artifact = {
+    id: string;
+    filename: string;
+    size_bytes: number;
+  };
+
+  type Patch = { id: string; name: string; releaseId: string; assetCount: number };
   type Build = { id: string; name: string; patches: Patch[] };
   type Version = { id: string; name: string; builds: Build[] };
 
-  const buildTree: Version[] = [
-    {
-      id: 'v0.0.3',
-      name: 'v0.0.3',
-      builds: [
-        {
-          id: 'dev',
-          name: 'dev',
-          patches: [
-            {
-              id: 'a',
-              name: 'a',
-              assets: [
-                { name: 'forge-ci-dev-a-linux-amd64.tar.gz', size: '128 MB' },
-                { name: 'forge-ci-dev-a-darwin-arm64.tar.gz', size: '122 MB' },
-                { name: 'forge-ci-dev-a-windows-x64.zip', size: '130 MB' },
-              ],
-            },
-            {
-              id: 'b',
-              name: 'b',
-              assets: [
-                { name: 'forge-ci-dev-b-linux-amd64.tar.gz', size: '129 MB' },
-                { name: 'forge-ci-dev-b-darwin-arm64.tar.gz', size: '123 MB' },
-                { name: 'forge-ci-dev-b-windows-x64.zip', size: '131 MB' },
-              ],
-            },
-          ],
-        },
-        {
-          id: 'prod',
-          name: 'prod',
-          patches: [
-            {
-              id: 'v0.0.3b',
-              name: 'v0.0.3b',
-              assets: [
-                { name: 'forge-ci-prod-v0.0.3b-linux-amd64.tar.gz', size: '130 MB' },
-                { name: 'forge-ci-prod-v0.0.3b-darwin-arm64.tar.gz', size: '124 MB' },
-                { name: 'forge-ci-prod-v0.0.3b-windows-x64.zip', size: '132 MB' },
-              ],
-            },
-          ],
-        },
-      ],
-    },
-    {
-      id: 'bixie',
-      name: 'bixie',
-      builds: [
-        {
-          id: 'dev',
-          name: 'dev',
-          patches: [
-            {
-              id: 'a',
-              name: 'a',
-              assets: [
-                { name: 'forge-ci-bixie-dev-a-linux-amd64.tar.gz', size: '134 MB' },
-                { name: 'forge-ci-bixie-dev-a-darwin-arm64.tar.gz', size: '129 MB' },
-                { name: 'forge-ci-bixie-dev-a-windows-x64.zip', size: '136 MB' },
-              ],
-            },
-          ],
-        },
-        {
-          id: 'prod',
-          name: 'prod',
-          patches: [
-            {
-              id: 'a',
-              name: 'a',
-              assets: [
-                { name: 'forge-ci-bixie-prod-a-linux-amd64.tar.gz', size: '140 MB' },
-                { name: 'forge-ci-bixie-prod-a-darwin-arm64.tar.gz', size: '135 MB' },
-                { name: 'forge-ci-bixie-prod-a-windows-x64.zip', size: '142 MB' },
-              ],
-            },
-          ],
-        },
-      ],
-    },
-  ];
+  let buildTree: Version[] = [];
+  let releases: Release[] = [];
+  let selected = { versionId: '', buildId: '', patchId: '', releaseId: '' };
+  let selectedUpdate = '';
+  let selectedArtifacts: Artifact[] = [];
+  let loading = true;
+  let error = '';
 
-  const updateModules = import.meta.glob('/docs/updates/**/*.md', {
-    query: '?raw',
-    import: 'default',
-    eager: true,
+  const formatBytes = (value: number) => {
+    if (!value) return '0 B';
+    if (value < 1024) return `${value} B`;
+    const kb = value / 1024;
+    if (kb < 1024) return `${kb.toFixed(1)} KB`;
+    const mb = kb / 1024;
+    if (mb < 1024) return `${mb.toFixed(1)} MB`;
+    const gb = mb / 1024;
+    return `${gb.toFixed(1)} GB`;
+  };
+
+  const buildTreeFromReleases = (items: Release[], artifactCounts: Record<string, number>) => {
+    const versionMap = new Map<string, Version>();
+
+    items.forEach((release) => {
+      if (!versionMap.has(release.version)) {
+        versionMap.set(release.version, { id: release.version, name: release.version, builds: [] });
+      }
+      const version = versionMap.get(release.version)!;
+      let build = version.builds.find((b) => b.id === release.build);
+      if (!build) {
+        build = { id: release.build, name: release.build, patches: [] };
+        version.builds = [...version.builds, build];
+      }
+      build.patches = [
+        ...build.patches,
+        {
+          id: release.patch,
+          name: release.patch,
+          releaseId: release.id,
+          assetCount: artifactCounts[release.id] ?? 0,
+        },
+      ];
+    });
+
+    return Array.from(versionMap.values()).map((version) => ({
+      ...version,
+      builds: [...version.builds]
+        .map((build) => ({
+          ...build,
+          patches: [...build.patches].sort((a, b) => a.name.localeCompare(b.name)),
+        }))
+        .sort((a, b) => a.name.localeCompare(b.name)),
+    }));
+  };
+
+  const selectPatch = async (versionId: string, buildId: string, patch: Patch) => {
+    selected = { versionId, buildId, patchId: patch.id, releaseId: patch.releaseId };
+    await loadReleaseDetails(patch.releaseId);
+  };
+
+  const loadReleaseDetails = async (releaseId: string) => {
+    try {
+      const [release, artifacts] = await Promise.all([
+        api.getPublicRelease(releaseId),
+        api.getPublicArtifacts(releaseId),
+      ]);
+      selectedUpdate = release.update_md || '';
+      selectedArtifacts = artifacts.map((item) => ({
+        id: item.id,
+        filename: item.filename,
+        size_bytes: item.size_bytes,
+      }));
+    } catch (err) {
+      selectedUpdate = '';
+      selectedArtifacts = [];
+      error = err instanceof Error ? err.message : 'Không thể tải release';
+    }
+  };
+
+  onMount(async () => {
+    loading = true;
+    error = '';
+    try {
+      releases = await api.getPublicReleases();
+      const artifactsByRelease = await Promise.all(
+        releases.map(async (release) => {
+          try {
+            const artifacts = await api.getPublicArtifacts(release.id);
+            return { id: release.id, count: artifacts.length };
+          } catch {
+            return { id: release.id, count: 0 };
+          }
+        })
+      );
+      const counts = artifactsByRelease.reduce<Record<string, number>>((acc, item) => {
+        acc[item.id] = item.count;
+        return acc;
+      }, {});
+      buildTree = buildTreeFromReleases(releases, counts);
+      const latest = [...releases].sort((a, b) => a.created_at - b.created_at).at(-1);
+      if (latest) {
+        selected = {
+          versionId: latest.version,
+          buildId: latest.build,
+          patchId: latest.patch,
+          releaseId: latest.id,
+        };
+        await loadReleaseDetails(latest.id);
+      }
+    } catch (err) {
+      error = err instanceof Error ? err.message : 'Không thể tải danh sách release';
+    } finally {
+      loading = false;
+    }
   });
-  const updateMap = updateModules as Record<string, string>;
 
-  const getUpdateKey = (versionId: string, buildId: string, patchId: string) =>
-    `/docs/updates/${versionId}/${buildId}/${patchId}.md`;
-
-  const getLatestSelection = () => {
-    const version = buildTree[buildTree.length - 1];
-    const build = version?.builds[version.builds.length - 1];
-    const patch = build?.patches[build.patches.length - 1];
-    return {
-      versionId: version?.id ?? '',
-      buildId: build?.id ?? '',
-      patchId: patch?.id ?? '',
-    };
-  };
-
-  let selected = getLatestSelection();
-
-  const selectPatch = (versionId: string, buildId: string, patchId: string) => {
-    selected = { versionId, buildId, patchId };
-  };
-
-  $: selectedVersion = buildTree.find((version) => version.id === selected.versionId);
-  $: selectedBuild = selectedVersion?.builds.find((build) => build.id === selected.buildId);
-  $: selectedPatch = selectedBuild?.patches.find((patch) => patch.id === selected.patchId);
-  $: updateKey = selectedPatch ? getUpdateKey(selected.versionId, selected.buildId, selected.patchId) : '';
-  $: updateMarkdown = updateKey && updateMap[updateKey] ? updateMap[updateKey] : '';
-  $: updateHtml = updateMarkdown ? marked.parse(updateMarkdown) : '';
+  $: updateHtml = selectedUpdate
+    ? marked.parse(selectedUpdate)
+    : '<p>Chọn một bản vá để xem nội dung cập nhật.</p>';
 </script>
 
 <div class="dark min-h-screen bg-background text-foreground">
-  <div class="min-h-screen lg:flex">
-    <aside class="w-full lg:w-80 border-b border-border bg-card/40 lg:border-b-0 lg:border-r">
-      <div class="px-5 py-6 border-b border-border">
-        <div class="flex items-center gap-2 text-sm font-semibold text-foreground">
-          <div class="h-9 w-9 rounded-lg bg-primary/15 text-primary flex items-center justify-center font-semibold">
-            CI
-          </div>
-          Public Releases
-        </div>
+  <div class="flex min-h-screen">
+    <aside class="w-72 border-r border-border bg-card p-5">
+      <div class="flex items-center gap-3 text-primary">
+        <Package class="h-5 w-5" />
+        <span class="text-sm font-semibold">OpenAction</span>
+      </div>
+      <nav class="mt-6 space-y-1 text-sm">
         <a
           href="/"
           use:link
-          class="mt-4 inline-flex items-center gap-2 text-xs text-muted-foreground hover:text-foreground transition-colors"
+          class="flex items-center gap-2 rounded-md px-2.5 py-2 text-muted-foreground hover:text-foreground hover:bg-muted/30"
         >
-          <Home class="h-3.5 w-3.5" />
-          Home
+          <Home class="h-4 w-4" />
+          Trang chính
         </a>
-      </div>
-
-      <div class="px-4 py-4 overflow-y-auto max-h-[calc(100vh-120px)]">
-        <div class="text-[11px] uppercase tracking-widest text-muted-foreground">Build Tree</div>
+        <div class="mt-4 text-xs uppercase tracking-wide text-muted-foreground">Build Tree</div>
         <div class="mt-4 tree">
-          {#each buildTree as version, versionIndex (version.id)}
-            <div class="tree-version">
-              <div class="tree-node tree-root">
-                <Package class="h-4 w-4 text-primary" />
-                <span class="text-sm font-semibold text-foreground">{version.name}</span>
-              </div>
-              <div class="tree-children">
-                {#each version.builds as build, buildIndex (build.id)}
-                  <div class={cn('tree-row', buildIndex === version.builds.length - 1 && 'tree-row-last')}>
-                    <div class="tree-node tree-branch">
-                      <Layers class="h-3.5 w-3.5 text-muted-foreground" />
-                      <span class="text-xs uppercase tracking-wide text-muted-foreground">{build.name}</span>
+          {#if loading}
+            <div class="text-xs text-muted-foreground">Đang tải dữ liệu...</div>
+          {:else if error}
+            <div class="text-xs text-status-error">{error}</div>
+          {:else}
+            {#each buildTree as version (version.id)}
+              <div class="tree-version">
+                <div class="tree-node tree-root">
+                  <Package class="h-4 w-4 text-primary" />
+                  <span class="text-sm font-semibold text-foreground">{version.name}</span>
+                </div>
+                <div class="tree-children">
+                  {#each version.builds as build, buildIndex (build.id)}
+                    <div class={cn('tree-row', buildIndex === version.builds.length - 1 && 'tree-row-last')}>
+                      <div class="tree-node tree-branch">
+                        <Layers class="h-3.5 w-3.5 text-muted-foreground" />
+                        <span class="text-xs uppercase tracking-wide text-muted-foreground">{build.name}</span>
+                      </div>
+                      <div class="tree-children">
+                        {#each build.patches as patch, patchIndex (patch.id)}
+                          <div class={cn('tree-row', patchIndex === build.patches.length - 1 && 'tree-row-last')}>
+                            <button
+                              type="button"
+                              class={cn(
+                                'tree-node tree-leaf w-full text-left text-xs transition-colors',
+                                selected.releaseId === patch.releaseId ? 'tree-selected' : 'tree-unselected'
+                              )}
+                              on:click={() => selectPatch(version.id, build.id, patch)}
+                            >
+                              <span class="flex items-center gap-2">
+                                <span class="font-medium text-foreground">{patch.name}</span>
+                              </span>
+                              <span class="text-[11px] text-muted-foreground">{patch.assetCount} assets</span>
+                            </button>
+                          </div>
+                        {/each}
+                      </div>
                     </div>
-                    <div class="tree-children">
-                      {#each build.patches as patch, patchIndex (patch.id)}
-                        <div class={cn('tree-row', patchIndex === build.patches.length - 1 && 'tree-row-last')}>
-                          <button
-                            type="button"
-                            class={cn(
-                              'tree-node tree-leaf w-full text-left text-xs transition-colors',
-                              selected.versionId === version.id &&
-                                selected.buildId === build.id &&
-                                selected.patchId === patch.id
-                                ? 'tree-selected'
-                                : 'tree-unselected'
-                            )}
-                            on:click={() => selectPatch(version.id, build.id, patch.id)}
-                          >
-                            <span class="font-medium">{patch.name}</span>
-                            <span class="text-[10px] text-muted-foreground">
-                              {patch.assets.length} assets
-                            </span>
-                          </button>
-                        </div>
-                      {/each}
-                    </div>
-                  </div>
-                {/each}
+                  {/each}
+                </div>
               </div>
-            </div>
-          {/each}
+            {/each}
+          {/if}
         </div>
-      </div>
+      </nav>
     </aside>
 
-    <main class="flex-1 px-6 py-8">
-      <div class="mx-auto max-w-5xl">
-        <div class="flex flex-wrap items-center gap-3 mb-6">
-          <span class="inline-flex items-center gap-2 rounded-full bg-muted px-3 py-1 text-xs text-muted-foreground">
-            Public Release Notes
-          </span>
-          {#if selectedPatch}
-            <span class="inline-flex items-center gap-2 rounded-full border border-border px-3 py-1 text-xs text-foreground">
-              {selectedVersion?.name} / {selectedBuild?.name} / {selectedPatch.name}
-            </span>
-          {/if}
+    <main class="flex-1 p-8 bg-background">
+      <div class="max-w-5xl">
+        <div class="flex items-center justify-between">
+          <div>
+            <h1 class="text-xl font-semibold text-foreground">Public Releases</h1>
+            <p class="text-sm text-muted-foreground mt-1">
+              Khám phá và tải bản build đã được phát hành.
+            </p>
+          </div>
         </div>
 
-        <section class="rounded-xl border border-border bg-card p-6">
-          <div class="flex items-center justify-between mb-4">
-            <h1 class="text-lg font-semibold text-foreground">Update Notes</h1>
-            {#if selectedPatch}
-              <span class="text-xs text-muted-foreground">Patch {selectedPatch.name}</span>
-            {/if}
-          </div>
-          {#if updateHtml}
-            <div class="update-content">{@html updateHtml}</div>
-          {:else}
-            <div class="text-sm text-muted-foreground">
-              No update content found for this patch.
+        <div class="mt-6 grid gap-6">
+          <section class="rounded-xl border border-border bg-card overflow-hidden">
+            <div class="px-5 py-4 border-b border-border bg-muted/20">
+              <h2 class="text-sm font-medium text-foreground">Update Notes</h2>
             </div>
-          {/if}
-        </section>
+            <div class="px-5 py-4">
+              <div class="update-content">{@html updateHtml}</div>
+            </div>
+          </section>
 
-        <section class="mt-6 rounded-xl border border-border bg-card overflow-hidden">
-          <div class="px-5 py-4 border-b border-border bg-muted/20 flex items-center justify-between">
-            <h2 class="text-sm font-medium text-foreground">Artifacts</h2>
-            <span class="text-xs text-muted-foreground">
-              {selectedPatch ? selectedPatch.assets.length : 0} files
-            </span>
-          </div>
-          <div class="divide-y divide-border/50">
-            {#if selectedPatch}
-              {#each selectedPatch.assets as asset (asset.name)}
-                <div class="flex items-center justify-between gap-4 px-5 py-4">
-                  <div class="min-w-0">
-                    <p class="text-sm font-medium text-foreground truncate">{asset.name}</p>
-                    <p class="text-xs text-muted-foreground mt-0.5">{asset.size}</p>
+          <section class="rounded-xl border border-border bg-card overflow-hidden">
+            <div class="px-5 py-4 border-b border-border bg-muted/20 flex items-center justify-between">
+              <h2 class="text-sm font-medium text-foreground">Artifacts</h2>
+              <span class="text-xs text-muted-foreground">
+                {selectedArtifacts.length} files
+              </span>
+            </div>
+            <div class="divide-y divide-border/50">
+              {#if selectedArtifacts.length > 0}
+                {#each selectedArtifacts as asset (asset.id)}
+                  <div class="flex items-center justify-between gap-4 px-5 py-4">
+                    <div class="min-w-0">
+                      <p class="text-sm font-medium text-foreground truncate">{asset.filename}</p>
+                      <p class="text-xs text-muted-foreground mt-0.5">{formatBytes(asset.size_bytes)}</p>
+                    </div>
+                    <a
+                      href={`/public/artifacts/${asset.id}/download`}
+                      class="inline-flex items-center gap-2 px-3 py-1.5 rounded-md text-xs bg-secondary text-secondary-foreground hover:bg-secondary/80 transition-colors"
+                    >
+                      <Download class="h-3.5 w-3.5" />
+                      Download
+                    </a>
                   </div>
-                  <button class="inline-flex items-center gap-2 px-3 py-1.5 rounded-md text-xs bg-secondary text-secondary-foreground hover:bg-secondary/80 transition-colors">
-                    <Download class="h-3.5 w-3.5" />
-                    Download
-                  </button>
+                {/each}
+              {:else}
+                <div class="px-5 py-6 text-sm text-muted-foreground">
+                  Chọn một bản vá để xem artifacts.
                 </div>
-              {/each}
-            {:else}
-              <div class="px-5 py-6 text-sm text-muted-foreground">
-                Select a patch from the left to view artifacts.
-              </div>
-            {/if}
-          </div>
-        </section>
+              {/if}
+            </div>
+          </section>
+        </div>
       </div>
     </main>
   </div>
@@ -325,15 +336,15 @@
     display: grid;
     gap: 0.35rem;
     margin-left: 0.45rem;
-    padding-left: 1.25rem;
+    padding-left: 1.35rem;
     position: relative;
   }
   .tree-children::before {
     content: '';
     position: absolute;
-    left: 0.22rem;
-    top: 0.092rem;
-    bottom: -0.02rem;
+    left: 0.3rem;
+    top: 0.12rem;
+    bottom: -0.1rem;
     width: 1px;
     background: hsl(var(--border));
   }
@@ -343,30 +354,30 @@
   .tree-row-last::after {
     content: '';
     position: absolute;
-    left: -0.75rem;
-    top: 50%;
+    left: -0.85rem;
+    top: calc(50% + 0.35rem);
     bottom: -0.55rem;
     width: 1px;
     background: hsl(var(--background));
   }
   .tree-branch,
   .tree-leaf {
-    padding-left: 0.25rem;
+    padding-left: 0.35rem;
   }
   .tree-branch::before,
   .tree-leaf::before {
     content: '';
     position: absolute;
-    left: -0.75rem;
+    left: -0.85rem;
     top: 50%;
-    width: 0.75rem;
+    width: 0.85rem;
     height: 1px;
     background: hsl(var(--border));
   }
   .tree-leaf {
     justify-content: space-between;
     border-radius: 0.45rem;
-    padding: 0.45rem 0.6rem 0.45rem 0.35rem;
+    padding: 0.45rem 0.6rem 0.45rem 0.4rem;
   }
   .tree-unselected {
     color: hsl(var(--foreground));

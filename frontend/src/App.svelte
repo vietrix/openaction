@@ -1,5 +1,6 @@
 <script lang="ts">
   import Index from '@/pages/Index.svelte';
+  import Login from '@/pages/Login.svelte';
   import Pipelines from '@/pages/Pipelines.svelte';
   import PipelineDetails from '@/pages/PipelineDetails.svelte';
   import Repositories from '@/pages/Repositories.svelte';
@@ -14,10 +15,12 @@
   import NotFound from '@/pages/NotFound.svelte';
   import Toaster from '@/components/ui/Toaster.svelte';
   import Sonner from '@/components/ui/Sonner.svelte';
-  import { location } from '@/lib/router';
+  import { location, navigate } from '@/lib/router';
+  import { api } from '@/lib/api';
 
   let currentComponent:
     | typeof Index
+    | typeof Login
     | typeof Pipelines
     | typeof PipelineDetails
     | typeof Repositories
@@ -31,13 +34,49 @@
     | typeof Settings
     | typeof NotFound = Index;
 
+  let authChecked = false;
+  let authCheckId = 0;
+  let lastPath = '';
+
   $: path = $location.pathname;
+
+  const isPublicPath = (value: string) =>
+    value === '/login' || value.startsWith('/public/');
+
+  const checkAuth = async (value: string) => {
+    if (isPublicPath(value)) {
+      authChecked = true;
+      return;
+    }
+    const current = ++authCheckId;
+    try {
+      await api.getMe();
+      if (current !== authCheckId) return;
+      authChecked = true;
+      if (value === '/login') {
+        navigate('/pipelines');
+      }
+    } catch {
+      if (current !== authCheckId) return;
+      authChecked = true;
+      if (value !== '/login') {
+        navigate('/login');
+      }
+    }
+  };
+
+  $: if (path && path !== lastPath) {
+    lastPath = path;
+    checkAuth(path);
+  }
 
   $: {
     const pipelineMatch = path.match(/^\/pipelines\/([^/]+)\/([^/]+)$/);
 
     if (path === '/') {
       currentComponent = Index;
+    } else if (path === '/login') {
+      currentComponent = Login;
     } else if (path === '/pipelines') {
       currentComponent = Pipelines;
     } else if (path === '/runners') {
@@ -69,4 +108,10 @@
 <Toaster />
 <Sonner />
 
-<svelte:component this={currentComponent} />
+{#if !authChecked && !isPublicPath(path)}
+  <div class="min-h-screen bg-background text-foreground flex items-center justify-center">
+    <div class="text-sm text-muted-foreground">Đang xác thực phiên...</div>
+  </div>
+{:else}
+  <svelte:component this={currentComponent} />
+{/if}

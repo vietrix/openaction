@@ -1,5 +1,7 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
   import { link } from '@/lib/router';
+  import { api } from '@/lib/api';
   import {
     Workflow,
     Play,
@@ -13,52 +15,77 @@
   import StatusBadge from '@/components/ui/StatusBadge.svelte';
   import PageShell from '@/components/layout/PageShell.svelte';
 
-  const pipelines = [
-    {
-      id: '1251',
-      project: 'forge-api',
-      branch: 'main',
-      commitHash: 'd4f6a2c',
-      commitMessage: 'feat: add OpenAPI validation middleware',
-      status: 'running' as const,
-      triggeredBy: 'minh',
-      duration: '1m 22s',
-      startedAt: '2 min ago',
-    },
-    {
-      id: '1250',
-      project: 'forge-web',
-      branch: 'feature/billing',
-      commitHash: '8ab13ef',
-      commitMessage: 'fix: prevent duplicate checkout session',
-      status: 'success' as const,
-      triggeredBy: 'linh',
-      duration: '4m 03s',
-      startedAt: '11 min ago',
-    },
-    {
-      id: '1249',
-      project: 'forge-worker',
-      branch: 'main',
-      commitHash: '6e20da1',
-      commitMessage: 'chore: bump redis client to v5',
-      status: 'error' as const,
-      triggeredBy: 'bot',
-      duration: '2m 48s',
-      startedAt: '22 min ago',
-    },
-    {
-      id: '1248',
-      project: 'forge-infra',
-      branch: 'main',
-      commitHash: 'a78c09b',
-      commitMessage: 'infra: optimize autoscaling thresholds',
-      status: 'success' as const,
-      triggeredBy: 'ops-bot',
-      duration: '7m 16s',
-      startedAt: '48 min ago',
-    },
-  ];
+  type PipelineItem = {
+    id: string;
+    projectId: string;
+    projectName: string;
+    branch: string;
+    commitHash: string;
+    commitMessage: string;
+    status: 'running' | 'success' | 'error' | 'pending';
+    triggeredBy: string;
+    duration: string;
+    startedAt: string;
+  };
+
+  let pipelines: PipelineItem[] = [];
+  let loading = true;
+  let error = '';
+
+  const formatDuration = (start?: number, end?: number) => {
+    if (!start) return '—';
+    const now = Math.floor(Date.now() / 1000);
+    const finish = end && end > 0 ? end : now;
+    const total = Math.max(0, finish - start);
+    const mins = Math.floor(total / 60);
+    const secs = total % 60;
+    if (mins <= 0) return `${secs}s`;
+    return `${mins}m ${secs}s`;
+  };
+
+  const formatRelativeTime = (timestamp?: number) => {
+    if (!timestamp) return '—';
+    const now = Math.floor(Date.now() / 1000);
+    const diff = Math.max(0, now - timestamp);
+    if (diff < 60) return `${diff}s ago`;
+    if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
+    if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
+    return `${Math.floor(diff / 86400)}d ago`;
+  };
+
+  const loadPipelines = async () => {
+    loading = true;
+    error = '';
+    try {
+      const projects = await api.getProjects();
+      const lists = await Promise.all(
+        projects.map(async (project) => ({
+          project,
+          pipelines: await api.getProjectPipelines(project.id),
+        }))
+      );
+      pipelines = lists.flatMap(({ project, pipelines }) =>
+        pipelines.map((item) => ({
+          id: item.id,
+          projectId: project.id,
+          projectName: project.name,
+          branch: item.branch,
+          commitHash: item.commit_hash,
+          commitMessage: item.commit_hash ? `Commit ${item.commit_hash}` : 'No commit message',
+          status: item.status as PipelineItem['status'],
+          triggeredBy: item.triggered_by,
+          duration: formatDuration(item.started_at, item.finished_at),
+          startedAt: formatRelativeTime(item.started_at),
+        }))
+      );
+    } catch (err) {
+      error = err instanceof Error ? err.message : 'Không thể tải pipeline';
+    } finally {
+      loading = false;
+    }
+  };
+
+  onMount(loadPipelines);
 
   $: total = pipelines.length;
   $: running = pipelines.filter((item) => item.status === 'running').length;
@@ -108,35 +135,43 @@
     </div>
 
     <div class="divide-y divide-border/50">
-      {#each pipelines as item (item.id)}
-        <a
-          href={`/pipelines/${item.project}/${item.id}`}
-          use:link
-          class="grid grid-cols-1 lg:grid-cols-[1.2fr_1fr_1fr_1fr_auto] gap-3 px-4 py-4 hover:bg-muted/20 transition-colors"
-        >
-          <div class="min-w-0">
-            <p class="text-sm font-medium truncate">{item.project} #{item.id}</p>
-            <p class="text-xs text-muted-foreground truncate mt-0.5">{item.commitMessage}</p>
-          </div>
+      {#if loading}
+        <div class="px-4 py-6 text-sm text-muted-foreground">Đang tải pipeline...</div>
+      {:else if error}
+        <div class="px-4 py-6 text-sm text-status-error">{error}</div>
+      {:else if pipelines.length === 0}
+        <div class="px-4 py-6 text-sm text-muted-foreground">Chưa có pipeline nào.</div>
+      {:else}
+        {#each pipelines as item (item.id)}
+          <a
+            href={`/pipelines/${item.projectId}/${item.id}`}
+            use:link
+            class="grid grid-cols-1 lg:grid-cols-[1.2fr_1fr_1fr_1fr_auto] gap-3 px-4 py-4 hover:bg-muted/20 transition-colors"
+          >
+            <div class="min-w-0">
+              <p class="text-sm font-medium truncate">{item.projectName} #{item.id}</p>
+              <p class="text-xs text-muted-foreground truncate mt-0.5">{item.commitMessage}</p>
+            </div>
 
-          <div class="text-xs text-muted-foreground flex items-center gap-1.5">
-            <GitBranch class="h-3.5 w-3.5" />
-            <span class="truncate">{item.branch}</span>
-          </div>
+            <div class="text-xs text-muted-foreground flex items-center gap-1.5">
+              <GitBranch class="h-3.5 w-3.5" />
+              <span class="truncate">{item.branch}</span>
+            </div>
 
-          <div class="text-xs text-muted-foreground flex items-center gap-1.5 font-mono">
-            <GitCommit class="h-3.5 w-3.5" />
-            {item.commitHash}
-          </div>
+            <div class="text-xs text-muted-foreground flex items-center gap-1.5 font-mono">
+              <GitCommit class="h-3.5 w-3.5" />
+              {item.commitHash}
+            </div>
 
-          <div class="text-xs text-muted-foreground flex items-center gap-1.5">
-            <Clock3 class="h-3.5 w-3.5" />
-            {item.duration} • {item.startedAt}
-          </div>
+            <div class="text-xs text-muted-foreground flex items-center gap-1.5">
+              <Clock3 class="h-3.5 w-3.5" />
+              {item.duration} • {item.startedAt}
+            </div>
 
-          <StatusBadge status={item.status} />
-        </a>
-      {/each}
+            <StatusBadge status={item.status} />
+          </a>
+        {/each}
+      {/if}
     </div>
   </div>
 </PageShell>

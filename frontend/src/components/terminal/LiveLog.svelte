@@ -14,12 +14,18 @@
   export let logs: LogLine[] = [];
   export let title = 'Build Logs';
   export let className = '';
+  export let streamUrl = '';
+  export let loading = false;
 
   let containerRef: HTMLDivElement | null = null;
   let copied = false;
   let autoScroll = true;
   let isHovered = false;
   let copyTimeout: ReturnType<typeof setTimeout> | null = null;
+  let socket: WebSocket | null = null;
+  let currentStreamUrl = '';
+  let entries: LogLine[] = [];
+  let lastLogsRef: LogLine[] | null = null;
 
   afterUpdate(() => {
     if (autoScroll && containerRef) {
@@ -29,7 +35,63 @@
 
   onDestroy(() => {
     if (copyTimeout) clearTimeout(copyTimeout);
+    if (socket) socket.close();
   });
+
+  $: if (logs !== lastLogsRef) {
+    lastLogsRef = logs;
+    entries = [...logs];
+  }
+
+  const appendLine = (message: string) => {
+    const timestamp = new Date().toLocaleTimeString('en-US', { hour12: false }).slice(0, 8);
+    entries = [
+      ...entries,
+      {
+        id: entries.length + 1,
+        timestamp,
+        level: parseLevel(message),
+        message,
+      },
+    ];
+  };
+
+  const parseLevel = (line: string): LogLine['level'] => {
+    if (/ERROR|FAILED|FAIL/i.test(line)) return 'error';
+    if (/WARN|WARNING/i.test(line)) return 'warn';
+    if (/SUCCESS|PASSED|OK/i.test(line)) return 'success';
+    if (/DEBUG/i.test(line)) return 'debug';
+    return 'info';
+  };
+
+  const connectStream = () => {
+    if (!streamUrl) return;
+    if (streamUrl === currentStreamUrl && socket) return;
+    if (socket) {
+      socket.close();
+      socket = null;
+    }
+    currentStreamUrl = streamUrl;
+    socket = new WebSocket(streamUrl);
+    socket.onmessage = (event) => {
+      const payload = typeof event.data === 'string' ? event.data : '';
+      payload.split('\n').forEach((line) => {
+        const trimmed = line.trim();
+        if (trimmed) appendLine(trimmed);
+      });
+    };
+    socket.onclose = () => {
+      socket = null;
+    };
+  };
+
+  $: if (streamUrl && streamUrl !== currentStreamUrl) {
+    connectStream();
+  } else if (!streamUrl && socket) {
+    socket.close();
+    socket = null;
+    currentStreamUrl = '';
+  }
 
   const handleScroll = () => {
     if (!containerRef) return;
@@ -39,7 +101,7 @@
   };
 
   const copyLogs = async () => {
-    const text = logs.map((log) => `[${log.timestamp}] ${log.message}`).join('\n');
+    const text = entries.map((log) => `[${log.timestamp}] ${log.message}`).join('\n');
     try {
       await navigator.clipboard.writeText(text);
       copied = true;
@@ -128,12 +190,16 @@
     class="flex-1 overflow-y-auto p-4 min-h-[200px] max-h-[400px]"
   >
     <div class="terminal-text space-y-0.5">
-      {#each logs as log (log.id)}
-        <div class="flex gap-3 leading-relaxed animate-fade-in">
-          <span class="shrink-0 text-muted-foreground/50 select-none">{log.timestamp}</span>
-          <span class={getLevelClass(log.level)}>{@html highlightKeywords(log.message)}</span>
-        </div>
-      {/each}
+      {#if loading && entries.length === 0}
+        <div class="text-xs text-muted-foreground">Đang tải log...</div>
+      {:else}
+        {#each entries as log (log.id)}
+          <div class="flex gap-3 leading-relaxed animate-fade-in">
+            <span class="shrink-0 text-muted-foreground/50 select-none">{log.timestamp}</span>
+            <span class={getLevelClass(log.level)}>{@html highlightKeywords(log.message)}</span>
+          </div>
+        {/each}
+      {/if}
     </div>
   </div>
 

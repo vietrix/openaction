@@ -76,6 +76,9 @@ func main() {
 	if err := seed.EnsureDefaults(ctx, database); err != nil {
 		log.Fatalf("seed error: %v", err)
 	}
+	if err := seed.EnsureSampleData(ctx, database, blobStore, cfg.DataDir); err != nil {
+		log.Fatalf("sample seed error: %v", err)
+	}
 
 	go authService.CleanupExpired(ctx)
 

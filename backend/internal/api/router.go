@@ -38,6 +38,7 @@ func (s *Server) Router() http.Handler {
 	r.Route("/public", func(r chi.Router) {
 		r.Get("/releases", s.handlePublicReleases)
 		r.Get("/releases/{id}", s.handlePublicRelease)
+		r.Get("/releases/{id}/artifacts", s.handlePublicArtifacts)
 		r.Get("/artifacts/{id}/download", s.handlePublicArtifactDownload)
 		r.Get("/latest/{name}", s.handlePublicLatest)
 	})
@@ -52,6 +53,8 @@ func (s *Server) Router() http.Handler {
 		r.Group(func(r chi.Router) {
 			r.Use(s.Auth.Middleware)
 			r.Use(s.Auth.CSRFMiddleware)
+
+			r.Get("/auth/me", s.handleMe)
 
 			r.With(s.requirePermission("projects.read")).Get("/projects", s.handleProjects)
 			r.With(s.requirePermission("projects.write")).Post("/projects", s.handleCreateProject)
@@ -145,6 +148,36 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 	s.Auth.ClearSessionCookie(w)
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
+	identity := identityFromContext(r)
+	if identity == nil {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	if identity.IsToken {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"id":         identity.UserID,
+			"email":      identity.Email,
+			"name":       identity.Email,
+			"is_token":   true,
+			"token_id":   identity.UserID,
+			"token_name": identity.Email,
+		})
+		return
+	}
+	var email, name string
+	if err := s.DB.QueryRowContext(r.Context(), "SELECT email,name FROM users WHERE id = ?", identity.UserID).Scan(&email, &name); err != nil {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"id":       identity.UserID,
+		"email":    email,
+		"name":     name,
+		"is_token": false,
+	})
 }
 
 func (s *Server) handleListTokens(w http.ResponseWriter, r *http.Request) {
@@ -583,6 +616,10 @@ func (s *Server) handlePublicReleases(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handlePublicRelease(w http.ResponseWriter, r *http.Request) {
 	s.handleRelease(w, r)
+}
+
+func (s *Server) handlePublicArtifacts(w http.ResponseWriter, r *http.Request) {
+	s.handleArtifacts(w, r)
 }
 
 func (s *Server) handlePublicArtifactDownload(w http.ResponseWriter, r *http.Request) {
